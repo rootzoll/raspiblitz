@@ -17,7 +17,27 @@ if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
  exit 1
 fi
 
+# unify and define bridges and torrc(s) path
+# bridges
+bridgesTor="/etc/tor/bridges"
+# default
 torrc="/etc/tor/torrc"
+# lnd
+torrclnd="/etc/tor/instances/lnd/torrc"
+
+# facilitate including bridges in the torrc(s)
+torrcPortable()
+{
+# torrcPble="/path/to/wanted/torrc"
+# declared wanted torrc path before calling this script
+    if [ -f $bridgesTor ]; then
+      sudo touch $torrcPtble
+      sudo sed -i "/UseBridge/,/^\s*$/{d}" $torrcPtble
+      sudo mv $torrcPtble $torrcPtble.tmp
+      sudo bash -c 'cat '$bridgesTor' '$torrcPtble'.tmp > '$torrcPtble''
+      sudo rm -rf $torrcPtble.tmp
+    fi
+}
 
 activateBitcoinOverTOR()
 {
@@ -115,6 +135,7 @@ activateLndOverTOR()
     sudo chown -R _tor-$NODENAME:_tor-$NODENAME /mnt/hdd/tor-$NODENAME
 
     echo "
+
 ### torrc for tor@$NODENAME
 ### https://github.com/lightningnetwork/lnd/blob/master/docs/configuring_tor.md
 
@@ -130,8 +151,11 @@ SafeLogging 1
 Log notice stdout
 Log notice file /mnt/hdd/tor-$NODENAME/notice.log
 Log info file /mnt/hdd/tor-$NODENAME/info.log
-" | sudo tee /etc/tor/instances/$NODENAME/torrc
-    sudo chmod 644 /etc/tor/instances/$NODENAME/torrc
+
+" | sudo tee $torrclnd
+    torrcPtble="${torrclnd}"
+    torrcPortable
+    sudo chmod 644 $torrclnd
 
     sudo mkdir -p /etc/systemd/system/tor@$NODENAME.service.d
     sudo tee /etc/systemd/system/tor@$NODENAME.service.d/raspiblitz.conf >/dev/null <<EOF
@@ -306,6 +330,7 @@ if [ "$1" = "1" ] || [ "$1" = "on" ]; then
   if [ ${isTorConfigOK} -eq 0 ]; then
     echo "# - updating Tor config ${torrc}"
     cat > ./torrc <<EOF
+
 ### torrc for tor@default
 ### See 'man tor', or https://www.torproject.org/docs/tor-manual.html
 
@@ -345,9 +370,11 @@ HiddenServicePort 10009 127.0.0.1:10009
 HiddenServiceDir /mnt/hdd/tor/lndrest8080/
 HiddenServiceVersion 3
 HiddenServicePort 8080 127.0.0.1:8080
+
 EOF
     sudo rm $torrc
-    sudo mv ./torrc $torrc
+    torrcPtble="${torrc}"
+    torrcPortable
     sudo chmod 644 $torrc
     sudo chown -R debian-tor:debian-tor /var/run/tor/ 2>/dev/null
     echo ""
@@ -488,6 +515,11 @@ fi
 
 # update
 if [ "$1" = "update" ]; then
+  # Uncomment deb-src from Tor repo
+  sudo touch /etc/apt/sources.list.d/tor-src.list
+  sudo touch /etc/apt/sources.list.d/tor-src-apttor.list
+  sudo sed -i 's/^.//' /etc/apt/sources.list.d/tor-src.list
+  sudo sed -i 's/^.//' /etc/apt/sources.list.d/tor-src-apttor.list
   # as in https://2019.www.torproject.org/docs/debian#source
   echo "# Install the dependencies"
   sudo apt update
@@ -508,6 +540,9 @@ if [ "$1" = "update" ]; then
   echo "# Starting the tor.service "
   sudo systemctl start tor
   echo "# Installed $(tor --version)"
+  # Comment deb-src from Tor repo to take less time when updating normal packages
+  sudo sed -i 's/^/#/' /etc/apt/sources.list.d/tor-src.list
+  sudo sed -i 's/^/#/' /etc/apt/sources.list.d/tor-src-apttor.list
   if [ $(systemctl status lnd | grep -c "active (running)") -gt 0 ];then
     echo "# LND needs to restart"
     sudo systemctl restart lnd
