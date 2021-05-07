@@ -13,11 +13,31 @@
 # command info
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
  echo "script to switch Tor on or off"
- echo "internet.tor.sh [status|on|off|btcconf-on|btcconf-off|lndconf-on|update]"
+ echo "internet.tor.sh [status|on|on bridge|off|btcconf-on|btcconf-off|lndconf-on|update]"
  exit 1
 fi
 
+# unify and define bridges and torrc(s) path
+# bridges
+bridgesTor="/etc/tor/bridges"
+# default
 torrc="/etc/tor/torrc"
+# lnd
+torrclnd="/etc/tor/instances/lnd/torrc"
+
+# facilitate including bridges in the torrc(s)
+torrcPtblFN()
+{
+# torrcPtbl="/path/to/wanted/torrc"
+# declared wanted torrc path before calling this script
+    if [ -f $bridgesTor ]; then
+      sudo touch $torrcPtbl
+      sudo sed -i "/UseBridge/,/^\s*$/{d}" $torrcPtbl
+      sudo mv $torrcPtbl $torrcPtbl.tmp
+      sudo bash -c 'cat '$bridgesTor' '$torrcPtbl'.tmp > '$torrcPtbl''
+      sudo rm -rf $torrcPtbl.tmp
+    fi
+}
 
 activateBitcoinOverTOR()
 {
@@ -115,6 +135,7 @@ activateLndOverTOR()
     sudo chown -R _tor-$NODENAME:_tor-$NODENAME /mnt/hdd/tor-$NODENAME
 
     echo "
+
 ### torrc for tor@$NODENAME
 ### https://github.com/lightningnetwork/lnd/blob/master/docs/configuring_tor.md
 
@@ -130,8 +151,11 @@ SafeLogging 1
 Log notice stdout
 Log notice file /mnt/hdd/tor-$NODENAME/notice.log
 Log info file /mnt/hdd/tor-$NODENAME/info.log
-" | sudo tee /etc/tor/instances/$NODENAME/torrc
-    sudo chmod 644 /etc/tor/instances/$NODENAME/torrc
+
+" | sudo tee $torrclnd
+    torrcPtbl="${torrclnd}"
+    torrcPtblFN
+    sudo chmod 644 $torrclnd
 
     sudo mkdir -p /etc/systemd/system/tor@$NODENAME.service.d
     sudo tee /etc/systemd/system/tor@$NODENAME.service.d/raspiblitz.conf >/dev/null <<EOF
@@ -240,12 +264,116 @@ if [ "$1" != "update" ]; then
   echo "making sure services are not running"
   sudo systemctl stop lnd 2>/dev/null
   sudo systemctl stop ${network}d 2>/dev/null
-  sudo systemctl stop tor@default 2>/dev/null
+  #sudo systemctl stop tor@default 2>/dev/null
 fi
+
+
+bridgeQuestion()
+{
+  _temp=$(mktemp -p /dev/shm/)
+  whiptail --title "Tor Bridges - Setup" --yes-button "Pluggable" --no-button "Normal" --yesno "What bridge class?\n" 11 40 3>&1 1>&2 2>&3
+  if [ $? -eq 0 ]; then
+  bridgeClass="pluggable"
+  else
+  bridgeClass="normal"
+  fi
+  if [ "${bridgeClass}" = "pluggable" ]; then
+  #Pluggable
+  whiptail --title "Tor Bridges - Setup" --yes-button "obfs4" --no-button "meek_lite" --yesno "What bridge type?\n" 11 40 3>&1 1>&2 2>&3
+  if [ $? -eq 0 ]; then
+      bridgeType="obfs4"
+  else
+      bridgeType="meek_lite"
+  fi
+  fi
+  if [ $? -eq 0 ] || [ $? -eq 1 ]; then
+  #Normal+Pluggable
+  l1="Enter the 1st bridge:\n"
+  l2="Leave it blank if you dont want any bridges"
+  dialog --title "Tor Bridges - Setup" --inputbox "$l1$l2" 11 130 2>$_temp
+  bridge1=$(cat $_temp)
+  shred -u $_temp
+  l1="Enter the 2nd bridge:\n"
+  l2="Leave it blank if you dont want any bridges"
+  dialog --title "Tor Bridges - Setup" --inputbox "$l1$l2" 11 130 2>$_temp
+  bridge2=$(cat $_temp)
+  shred -u $_temp
+  l1="Enter the 3rd bridge:\n"
+  l2="Leave it blank if you dont want any bridges"
+  dialog --title "Tor Bridges - Setup" --inputbox "$l1$l2" 11 130 2>$_temp
+  bridge3=$(cat $_temp)
+  shred -u $_temp
+  l1="----------------------------------------------------------------------------\n"
+  l2="${bridgeClass}\n"
+  l3="${bridgeType}\n"
+  l4="\n"
+  l5="${bridge1}\n"
+  l6="\n"
+  l7="${bridge2}\n"
+  l8="\n"
+  l9="${bridge3}\n"
+  l10="---------------------------------------------------------------------------\n"
+  whiptail --title "Tor Bridges - Setup" --yes-button "Confirm" --no-button "Cancel" --yesno "Confirm the information below OR cancel?\n$l1$l2$l3$l4$l5$l6$l7$l8$l9$l10" 25 80 3>&1 1>&2 2>&3
+  if [ $? -eq 0 ]; then
+      bridgeInsert
+  fi
+  fi
+}
+
+bridgeInsert()
+{
+  if [ ! -z "${bridge1}" ] || [ ! -z "${bridge2}" ] || [ ! -z "${bridge3}" ]; then
+  sudo touch $torrc $torrclnd
+  sudo mv $torrc $torrc.tmp
+  sudo mv $torrclnd $torrclnd.tmp
+  sudo rm -rf $bridgesTor
+  sudo touch $bridgesTor
+  echo "" | sudo tee -a $bridgesTor
+  echo "UseBridges 1" | sudo tee -a $bridgesTor
+  if [ ! -z "${bridge1}" ] || [ ! -z "${bridge2}" ] || [ ! -z "${bridge3}" ] && [ "${bridgeType}" = "obfs4" ] || [ "${bridgeType}" = "meek_lite" ]; then
+      echo "ClientTransportPlugin ${bridgeType} exec /usr/bin/obfs4proxy managed" | sudo tee -a $bridgesTor
+  fi
+  if [ ! -z "${bridge1}" ]; then
+      echo "Bridge ${bridge1}" | sudo tee -a $bridgesTor
+  fi
+  if [ ! -z "${bridge2}" ]; then
+      echo "Bridge ${bridge2}" | sudo tee -a $bridgesTor
+  fi
+  if [ ! -z "${bridge3}" ]; then
+      echo "Bridge ${bridge3}" | sudo tee -a $bridgesTor
+  fi
+  echo "" | sudo tee -a $bridgesTor
+  sudo bash -c 'cat '$bridgesTor' '$torrc.tmp' > '$torrc''
+  sudo bash -c 'cat '$bridgesTor' '$torrclnd.tmp' > '$torrclnd''
+  sudo rm -rf $torrc.tmp $torrclnd.tmp
+  fi
+}
+
+bridgeWhiptail()
+{
+  # Check if user want to erase the old bridge configuration.
+  bridgeAlreadyConfiguredTorrc=$(cat $torrc | grep UseBridge)
+  bridgeAlreadyConfiguredTorrclnd=$(cat $torrclnd | grep UseBridge)
+  if [ "${bridgeAlreadyConfiguredTorrc}" != "" ] || [ "${bridgeAlreadyConfiguredTorrclnd}" != "" ]; then
+    whiptail --title "Tor Bridges - Setup" --yes-button "DELETE+REPLACE" --no-button "Cancel" --yesno "Bridges configuration found in torrc. Do you wish to replace with new bridges (DELETE+REPLACE) OR maintain the old bridges (Cancel)?\n\n----------------------------------------------------------------------------\n$(cat '$torrc' | grep UseBridges | cat '$torrc' | grep ClientTransportPlugin | cat '$torrc' | grep Bridge)" 25 80 3>&1 1>&2 2>&3
+    if [ $? -eq 0 ]; then
+      # delete old bridges lines
+      sudo sed -i "/UseBridge/,/^\s*$/{d}" $torrc
+      sudo sed -i "/UseBridge/,/^\s*$/{d}" $torrclnd
+      bridgeQuestion
+    fi
+  else
+    whiptail --title "Tor Bridges - Setup" --yes-button "INSERT" --no-button "Cancel" --yesno "Find detailed information about bridges relevance in the FAQ\nhttps://github.com/rootzoll/raspiblitz/blob/master/FAQ.md#how-can-i-use-bridges-with-tor\n\nDo you wish to insert new bridges OR cancel operation?\n" 15 60 3>&1 1>&2 2>&3
+    if [ $? -eq 0 ]; then
+      bridgeQuestion
+    fi
+  fi
+}
 
 # switch on
 if [ "$1" = "1" ] || [ "$1" = "on" ]; then
   echo "# switching Tor ON"
+  echo
 
   # *** CURL TOR PROXY ***
   # see https://github.com/rootzoll/raspiblitz/issues/1341
@@ -269,25 +397,166 @@ if [ "$1" = "1" ] || [ "$1" = "on" ]; then
   # setting value in raspi blitz config
   sudo sed -i "s/^runBehindTor=.*/runBehindTor=on/g" /mnt/hdd/raspiblitz.conf
 
-  # check if Tor was already installed and is funtional
-  echo ""
+  #
   echo "*** Check if Tor service is functional ***"
   torRunning=$(curl --connect-timeout 10 --socks5-hostname 127.0.0.1:9050 https://check.torproject.org 2>/dev/null | grep "Congratulations. This browser is configured to use Tor." -c)
   if [ ${torRunning} -gt 0 ]; then
-    clear
     echo "You are all good - Tor is already running."
-    echo ""
-    exit 0
+    echo "If you still think there is something wrong with Tor, toggle 'off' and 'on' again."
+    torWasOn=1
+    if [ "$2" = "bridge" ]; then
+    echo "User chose to add bridges, will continue with the script."
+    elif [ "$2" != "bridge" ]; then
+      exit 0
+    fi
   else
     echo "Tor not running ... proceed with switching to Tor."
+  fi
+  echo ""
+
+  # BRIDGE
+  if [ "$2" = "bridge" ]; then
+  
+    # BUILD BRIDGES
+    echo deb https://deb.debian.org/debian buster main contrib non-free | sudo tee -a /etc/apt/sources.list.d/temp.list
+    sudo apt update
+    echo "*** Compile obfs4proxy from source ***" 
+    mkdir -p obfs4proxy
+    cd obfs4proxy/
+    sudo apt install -y obfs4proxy
+    sudo apt source obfs4proxy
+    sudo apt build-dep -y obfs4proxy
+    cd obfs4proxy-*
+    dpkg-buildpackage -b -uc
+    cd ..
+    dpkg -i obfs4proxy_*.deb 
+    sudo apt update
+    sudo apt --only-upgrade install obfs4proxy
+    cd ..
+    sudo rm -rf obfs4proxy
+    cd
+    echo "# Installed $(obfs4proxy --version)"
+    echo ""
+    sudo rm -f /etc/apt/sources.list.d/temp.list
+  
+    # MASK TOR
+    # Tor is installed in the build_sdcard.sh, if the user was using Public IP, give him a chance to add bridges
+    # Tor will just start after user has the possibility to input bridges to mask he is using Tor
+    # This is for security reasons if someone is in danger to no appear in the radar.
+    echo "*** Mask Tor before installing ***"
+    echo "# Preventing Tor from start before user configuration"
+    sudo systemctl mask tor@default.service
+    isTorMasked=$(sudo systemctl is-enabled tor@default)
+    sleep 3
+    if [ ${isTorMasked} != "masked" ]; then
+      echo "Failed to mask Tor, open an issue on github"
+      exit 0
+    else
+      echo "Tor is masked now"
+    fi
+    echo ""
+
+    # install package just in case it was deinstalled
+    packageInstalled=$(dpkg -s tor | grep -c 'Status: install ok')
+    if [ ${packageInstalled} -eq 0 ]; then
+      sudo apt install -y tor nyx torsocks apt-transport-tor deb.torproject.org-keyring
+    fi
+
+    # BRIDGE QUESTIONS
+    bridgeWhiptail
+
+    # UNMASK TOR
+    # systemctl restart because it could be already started from a failed build before, so we can see the right bootstrap logs. Start dont singal to reboot the service. 
+    echo "*** Unmask Tor ***"
+    sudo systemctl unmask tor@default.service
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed
+    sudo update-rc.d tor enable
+    sudo systemctl restart tor@default.service
+    ## sleep long enough to bootstrap when using bridges (usually has a delay to bootstrap).
+    echo "Sleeping for 30 seconds. Waiting for Tor to fully bootstrap"
+    sleep 30
+    # Don't show full logs (systemctl), cause bridges IP and Descriptors are displayed here and cant be hidden by Tor configuration.
+    sudo systemctl status tor@default | grep Active && sudo systemctl status tor@default | grep Bootstrapped
+    #sudo systemctl status tor@default | grep -v 'bridge\|Bridge'
     echo ""
   fi
 
-  # install package just in case it was deinstalled
-  packageInstalled=$(dpkg -s tor-arm | grep -c 'Status: install ok')
-  if [ ${packageInstalled} -eq 0 ]; then
-    sudo apt install tor tor-arm torsocks -y
+  # check if Tor was already installed and is funtional
+  if [ "$2" != "bridge" ]; then
+    # install package just in case it was deinstalled
+    echo "Installing latest tor packages version"
+    packageInstalled=$(dpkg -s tor | grep -c 'Status: install ok')
+    if [ ${packageInstalled} -eq 0 ]; then
+      sudo apt install -y tor nyx torsocks apt-transport-tor deb.torproject.org-keyring
+    fi
+    sudo systemctl restart tor@default
+    echo "Sleeping for 30 seconds. Waiting for Tor to fully bootstrap"
+    sleep 30
   fi
+  echo ""
+
+  echo "*** Check if Tor service is functional ***"
+  torRunning=$(curl --connect-timeout 15 --socks5-hostname 127.0.0.1:9050 https://check.torproject.org 2>/dev/null | grep "Congratulations. This browser is configured to use Tor." -c)
+  if [ ${torRunning} -gt 0 ]; then
+    echo "You are all good - Tor is already running."
+    if [ ${torWasOn} -eq 1 ]; then
+      echo "Tor was ON previously,  will exit now"
+      exit 0
+    fi
+  else
+    echo "!!! FAIL: Tor is not running ... exiting now."
+    echo "Correct the file /etc/tor/torrc manually (for more fine grained management) before running this script again."
+    echo "Debug tor@default.service with 'sudo journalctl -eu tor@default'."
+    exit 0
+  fi
+  echo ""
+  
+  echo "*** Adding KEYS deb.torproject.org ***"
+  # fix for v1.6 base image https://github.com/rootzoll/raspiblitz/issues/1906#issuecomment-755299759
+  # fix for v1.7 tor domain blocked https://github.com/rootzoll/raspiblitz/issues/2054#issuecomment-800383278
+  # will use torsocks anyway, cause Tor needs to be running for whom needs it the most, and it will exit above on the test if not working.
+  torsocks wget -qO- http://apow7mjfryruh65chtdydfmqfpj5btws7nbocgtaovhvezgccyjazpqd.onion/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc | sudo gpg --import
+  sudo gpg --export A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89 | sudo apt-key add -
+  torKeyAvailable=$(sudo gpg --list-keys | grep -c "A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89")
+  if [ ${torKeyAvailable} -eq 0 ]; then
+    echo "!!! FAIL: Was not able to import deb.torproject.org key"
+    exit 1
+  fi
+  echo "OK - key added"
+  echo ""
+    
+  # deb-src from Tor repo will be uncommented with the Update option.
+  echo "*** Adding Tor Sources to sources lists ***"
+  distribution=$(lsb_release -sc)
+  if [ "$2" = "bridge" ]; then
+    echo "- adding 'deb tor://' for Tor to /etc/apt/sources.list.d/tor-apttor.list"
+    sudo tee /etc/apt/sources.list.d/tor-apttor.list << EOF
+deb [arch=amd64,arm64] tor+http://apow7mjfryruh65chtdydfmqfpj5btws7nbocgtaovhvezgccyjazpqd.onion/torproject.org ${distribution} main
+EOF
+    echo "- adding 'deb-src tor://' for Tor to /etc/apt/sources.list.d/tor-src-apttor.list"
+    sudo tee /etc/apt/sources.list.d/tor-src-apttor.list << EOF
+#deb-src [arch=amd64,arm64] tor+http://apow7mjfryruh65chtdydfmqfpj5btws7nbocgtaovhvezgccyjazpqd.onion/torproject.org ${distribution} main
+EOF
+    echo "OK - Tor sources added"
+  else
+    echo "- adding 'deb https://' for Tor to /etc/apt/sources.list.d/tor.list"
+    sudo tee /etc/apt/sources.list.d/tor.list << EOF
+deb [arch=amd64,arm64] https://deb.torproject.org/torproject.org ${distribution} main
+EOF
+    echo "- adding 'deb-src https://' for Tor to /etc/apt/sources.list.d/tor-src.list"
+    sudo tee /etc/apt/sources.list.d/tor-src.list << EOF
+#deb-src [arch=amd64,arm64] https://deb.torproject.org/torproject.org ${distribution} main
+EOF
+    echo "OK - Tor sources added"
+  fi
+  echo ""
+
+  # Now Tor will be installed in the latest version from Tor Project repo.
+  echo "*** Install & Enable Tor ***"
+  sudo apt update
+  sudo apt install -y tor torsocks nyx
+  echo ""  
 
   # create tor data directory if it not exist
   if [ ! -d "/mnt/hdd/tor" ]; then
@@ -302,10 +571,11 @@ if [ "$1" = "1" ] || [ "$1" = "on" ]; then
   sudo chown -R debian-tor:debian-tor /mnt/hdd/tor
 
   # create tor config .. if not exists or is old
-  isTorConfigOK=$(sudo cat /etc/tor/torrc 2>/dev/null | grep -c "Bitcoin")
+  isTorConfigOK=$(sudo cat ${torrc} 2>/dev/null | grep -c "Bitcoin")
   if [ ${isTorConfigOK} -eq 0 ]; then
     echo "# - updating Tor config ${torrc}"
     cat > ./torrc <<EOF
+
 ### torrc for tor@default
 ### See 'man tor', or https://www.torproject.org/docs/tor-manual.html
 
@@ -345,9 +615,11 @@ HiddenServicePort 10009 127.0.0.1:10009
 HiddenServiceDir /mnt/hdd/tor/lndrest8080/
 HiddenServiceVersion 3
 HiddenServicePort 8080 127.0.0.1:8080
+
 EOF
     sudo rm $torrc
-    sudo mv ./torrc $torrc
+    torrcPtblFN="${torrc}"
+    torrcPtblFN
     sudo chmod 644 $torrc
     sudo chown -R debian-tor:debian-tor /var/run/tor/ 2>/dev/null
     echo ""
@@ -479,7 +751,7 @@ if [ "$1" = "0" ] || [ "$1" = "off" ]; then
   if [ "$2" == "clear" ]; then
       echo "# *** Deinstall Tor & Delete Data ***"
       sudo rm -r /mnt/hdd/tor 2>/dev/null
-      sudo apt remove tor tor-arm -y
+      sudo apt remove tor nyx -y
   fi
 
   echo "# needs reboot to activate new setting"
@@ -488,6 +760,11 @@ fi
 
 # update
 if [ "$1" = "update" ]; then
+  # Uncomment deb-src from Tor repo
+  sudo touch /etc/apt/sources.list.d/tor-src.list
+  sudo touch /etc/apt/sources.list.d/tor-src-apttor.list
+  sudo sed -i 's/^.//' /etc/apt/sources.list.d/tor-src.list
+  sudo sed -i 's/^.//' /etc/apt/sources.list.d/tor-src-apttor.list
   # as in https://2019.www.torproject.org/docs/debian#source
   echo "# Install the dependencies"
   sudo apt update
@@ -508,6 +785,9 @@ if [ "$1" = "update" ]; then
   echo "# Starting the tor.service "
   sudo systemctl start tor
   echo "# Installed $(tor --version)"
+  # Comment deb-src from Tor repo to take less time when updating normal packages
+  sudo sed -i 's/^/#/' /etc/apt/sources.list.d/tor-src.list
+  sudo sed -i 's/^/#/' /etc/apt/sources.list.d/tor-src-apttor.list
   if [ $(systemctl status lnd | grep -c "active (running)") -gt 0 ];then
     echo "# LND needs to restart"
     sudo systemctl restart lnd
