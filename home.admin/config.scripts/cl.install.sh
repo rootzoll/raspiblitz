@@ -2,7 +2,7 @@
 # https://lightning.readthedocs.io/
 
 # https://github.com/ElementsProject/lightning/releases
-CLVERSION="v25.05"
+CLVERSION="v25.12.1"
 
 # https://github.com/ElementsProject/lightning/tree/master/contrib/keys
 # rustyrussell D9200E6CD1ADB8F1
@@ -11,9 +11,11 @@ CLVERSION="v25.05"
 # pneuroth (nepet) C3F21EE387FF4CD2
 # sfarooqui (ShahanaFarooqui) B56B4453DA8C6DF7FC9BCFCBDCA40B7128DA62A8
 # amyers (endothermicdev) F3BF63F2747436AB
-PGPsigner="amyers"
+# madel (Madeline Paech) A57AFC231B580804
+# cln (cln@blockstream.com) 616C52F99D0612B2A151B1074129A994AA7E9852
+PGPsigner="cln"
 PGPpubkeyLink="https://raw.githubusercontent.com/ElementsProject/lightning/master/contrib/keys/${PGPsigner}.txt"
-PGPpubkeyFingerprint="F3BF63F2747436AB"
+PGPpubkeyFingerprint="616C52F99D0612B2A151B1074129A994AA7E9852"
 
 # help
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
@@ -34,31 +36,13 @@ fi
 
 function installDependencies() {
   echo "- installDependencies()"
-  # from https://lightning.readthedocs.io/INSTALL.html#to-build-on-ubuntu
+  # from https://docs.corelightning.org/docs/installation#to-build-on-ubuntu
   # apt packages
   sudo apt-get install -y \
-    autoconf automake build-essential git libtool libsqlite3-dev \
-    net-tools zlib1g-dev libsodium-dev gettext
-  # additional requirements
+    autoconf automake build-essential git libtool libsqlite3-dev libffi-dev \
+    python3 python3-pip python3-mako net-tools zlib1g-dev libsodium-dev gettext lowdown
+  # additional requirements (postgres support)
   sudo apt-get install -y libpq-dev
-  # for clnrest - https://docs.corelightning.org/docs/installation#clnrest
-  sudo apt-get install -y python3-json5 python3-flask python3-gunicorn python3-grpc-tools
-
-  # python deps for wss-proxy
-  # upgrade pip
-  sudo pip3 config set global.break-system-packages true
-  sudo pip3 install --upgrade pip
-  # for wss-proxy - https://docs.corelightning.org/docs/installation#wss-proxy
-  sudo -u bitcoin pip3 config set global.break-system-packages true
-  sudo -u bitcoin pip3 install --user pyln-client websockets grpcio-tools
-  # poetry
-  sudo pip3 install poetry
-  if ! grep -Eq '^PATH="$HOME/.local/bin:$PATH"' /home/bitcoin/.profile; then
-    echo 'PATH="$HOME/.local/bin:$PATH"' | sudo tee -a /home/bitcoin/.profile
-  fi
-  export PATH="home/bitcoin/.local/bin:$PATH"
-  cd /home/bitcoin/lightning || exit 1
-  sudo -u bitcoin poetry install
 
   # rust deps for cln-grpc and clnrest plugins
   echo "# Install Rust to /opt/rust/"
@@ -73,6 +57,9 @@ function installDependencies() {
   sudo usermod -a -G rust bitcoin
   echo "# Set the default Rust toolchain"
   sudo RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust /opt/rust/bin/rustup default stable
+  # Ensure permissions are correct after rustup operations
+  sudo chown -R root:rust /opt/rust
+  sudo chmod -R g+w /opt/rust
   echo "# Make Rust binaries available system-wide"
   sudo ln -sf /opt/rust/bin/* /usr/local/bin/
   echo "# Set up system-wide environment variables for Rust"
@@ -83,6 +70,18 @@ function installDependencies() {
     echo 'CARGO_HOME=/opt/rust' | sudo tee -a /etc/environment
   fi
 
+  # Install uv for Python dependency management (replaces poetry in CLN 25.x+)
+  echo "# Installing uv for Python dependency management"
+  if ! command -v uv &>/dev/null; then
+    sudo RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust cargo install --locked uv || exit 1
+    # Ensure uv is symlinked into /usr/local/bin
+    sudo ln -sf /opt/rust/bin/uv /usr/local/bin/uv
+  fi
+
+  # Sync Python dependencies with uv
+  cd /home/bitcoin/lightning || exit 1
+  sudo -u bitcoin RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust uv sync --all-extras --all-groups --frozen
+
   sudo apt-get install -y protobuf-compiler
 
   # remove old clnrest dir if exists
@@ -92,44 +91,107 @@ function installDependencies() {
 }
 
 function buildAndInstallCLbinaries() {
+  # Optional parameter: version to pass to make (for zip builds without git)
+  local buildVersion="$1"
 
-  sudo -u bitcoin python3 -m pip install --user --upgrade grpcio-tools protobuf
+  cd /home/bitcoin/lightning || exit 1
 
-  # patch makefile
-  sudo -u bitcoin sed -i -E 's/ --experimental_allow_proto3_optional(=true)?//g' Makefile
-
-  # delete old file
-  sudo -u bitcoin rm -f contrib/pyln-grpc-proto/pyln/grpc/*_pb2.py contrib/pyln-grpc-proto/pyln/grpc/*_pb2_grpc.py
+  # Ensure /opt/rust has correct permissions before building
+  echo "# Ensuring /opt/rust permissions for rust group"
+  sudo chown -R root:rust /opt/rust
+  sudo chmod -R g+w /opt/rust
 
   echo
   echo "########## configure"
   sudo -u bitcoin RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust ./configure || exit 1
   echo
-  echo "########## make"
-  sudo -u bitcoin RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust make -j"$(nproc)" || exit 1
-  echo 
+  echo "########## make (using uv run)"
+  # Pass VERSION to make if provided (needed for zip builds without git history)
+  if [ -n "${buildVersion}" ]; then
+    sudo -u bitcoin RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust VERSION="${buildVersion}" uv run make -j"$(nproc)" || exit 1
+  else
+    sudo -u bitcoin RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust uv run make -j"$(nproc)" || exit 1
+  fi
+  echo
   echo "########## install"
-  sudo make RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust install || exit 1
+  sudo RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust make install || exit 1
+}
+
+function downloadAndVerifySourceZip() {
+  # Downloads, verifies, and extracts the CLN source zip
+  # Uses CLVERSION variable for the version to download
+  cd /home/bitcoin || exit 1
+  echo
+  echo "- Downloading Core Lightning ${CLVERSION} source release"
+  echo
+
+  # Download the source zip and SHA256SUMS signature file
+  sudo -u bitcoin wget -O "clightning-${CLVERSION}.zip" \
+    "https://github.com/ElementsProject/lightning/releases/download/${CLVERSION}/clightning-${CLVERSION}.zip" || exit 1
+  sudo -u bitcoin wget -O "SHA256SUMS-${CLVERSION}" \
+    "https://github.com/ElementsProject/lightning/releases/download/${CLVERSION}/SHA256SUMS-${CLVERSION}" || exit 1
+  sudo -u bitcoin wget -O "SHA256SUMS-${CLVERSION}.asc" \
+    "https://github.com/ElementsProject/lightning/releases/download/${CLVERSION}/SHA256SUMS-${CLVERSION}.asc" || exit 1
+
+  echo
+  echo "- Importing PGP key of ${PGPsigner} for verification"
+  echo
+
+  # Import PGP key
+  sudo -u bitcoin wget -O "/var/cache/raspiblitz/pgp_keys_${PGPsigner}.asc" "${PGPpubkeyLink}" || exit 1
+  echo "# Verifying ${PGPsigner} key fingerprint"
+  fingerprint=$(gpg --show-keys --keyid-format LONG "/var/cache/raspiblitz/pgp_keys_${PGPsigner}.asc" 2>/dev/null | grep -c "${PGPpubkeyFingerprint}")
+  if [ "${fingerprint}" -lt 1 ]; then
+    echo "# ERROR --> ${PGPsigner} PGP fingerprint mismatch"
+    exit 1
+  fi
+  sudo -u bitcoin gpg --import "/var/cache/raspiblitz/pgp_keys_${PGPsigner}.asc" || exit 1
+
+  echo
+  echo "- Verifying SHA256SUMS signature"
+  echo
+
+  # Verify the signature on SHA256SUMS
+  sudo -u bitcoin gpg --verify "SHA256SUMS-${CLVERSION}.asc" "SHA256SUMS-${CLVERSION}" 2>&1 | tee /tmp/cl_gpg_verify.txt
+  goodSignature=$(grep -c "Good signature" /tmp/cl_gpg_verify.txt)
+  if [ "${goodSignature}" -lt 1 ]; then
+    echo "# ERROR --> SHA256SUMS signature verification failed"
+    exit 1
+  fi
+  echo "# OK - SHA256SUMS signature verified"
+
+  echo
+  echo "- Verifying source zip checksum"
+  echo
+
+  # Verify the zip file checksum
+  expectedChecksum=$(grep "clightning-${CLVERSION}.zip" "SHA256SUMS-${CLVERSION}" | awk '{print $1}')
+  actualChecksum=$(sha256sum "clightning-${CLVERSION}.zip" | awk '{print $1}')
+  if [ "${expectedChecksum}" != "${actualChecksum}" ]; then
+    echo "# ERROR --> Checksum mismatch for clightning-${CLVERSION}.zip"
+    echo "# Expected: ${expectedChecksum}"
+    echo "# Actual: ${actualChecksum}"
+    exit 1
+  fi
+  echo "# OK - Checksum verified for clightning-${CLVERSION}.zip"
+
+  echo
+  echo "- Extracting source"
+  echo
+
+  # Extract and set up directory
+  sudo -u bitcoin unzip -q "clightning-${CLVERSION}.zip" || exit 1
+  sudo -u bitcoin rm -rf lightning
+  sudo -u bitcoin mv "clightning-${CLVERSION}" lightning
+  sudo -u bitcoin rm -f "clightning-${CLVERSION}.zip" "SHA256SUMS-${CLVERSION}" "SHA256SUMS-${CLVERSION}.asc"
 }
 
 function runTests() {
-  # for the tests - install Core Lightning test dependencies matching pyproject.toml versions
-  # based on https://github.com/ElementsProject/lightning/blob/master/contrib/pyln-testing/pyproject.toml
-  echo "- install Core Lightning test dependencies"
-  sudo -u bitcoin pip3 install --user --upgrade \
-    "pytest>=7" \
-    "ephemeral-port-reserve>=1.1.4" \
-    "psycopg2-binary>=2.9" \
-    "python-bitcoinlib>=0.11.0" \
-    "jsonschema>=4.4.0" \
-    "Flask>=2" \
-    "cheroot>=8,<=10" \
-    "psutil>=5.9" \
-    "requests>=2.31.0" \
-    python-socketio websocket-client flaky
-  echo "- run tests"
+  # Test dependencies are managed by uv sync in installDependencies()
+  cd /home/bitcoin/lightning || exit 1
+  echo "- run tests (using uv run)"
   echo
-  sudo -u bitcoin RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust make check || exit 1
+  sudo -u bitcoin RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust uv run make check VALGRIND=0 || exit 1
 }
 
 echo "# Running: 'cl.install.sh $*'"
@@ -184,22 +246,12 @@ if [ "$1" = "install" ]; then
   fi
 
   # download and verify the source from github
-  cd /home/bitcoin || exit 1
-  echo
-  echo "- Cloning https://github.com/ElementsProject/lightning.git"
-  echo
-  sudo -u bitcoin git clone https://github.com/ElementsProject/lightning.git
-  cd lightning || exit 1
-  echo
-  echo "- Reset to version ${CLVERSION}"
-  sudo -u bitcoin git reset --hard ${CLVERSION}
-
-  sudo -u bitcoin /home/admin/config.scripts/blitz.git-verify.sh \
-    "${PGPsigner}" "${PGPpubkeyLink}" "${PGPpubkeyFingerprint}" "${CLVERSION}" || exit 1
+  downloadAndVerifySourceZip
 
   installDependencies
 
-  buildAndInstallCLbinaries || exit 1
+  # Pass version since zip has no git history
+  buildAndInstallCLbinaries "${CLVERSION}" || exit 1
 
   installed=$(sudo -u bitcoin lightning-cli --version)
   if [ ${#installed} -eq 0 ]; then
@@ -254,32 +306,41 @@ if [ "$1" = on ] || [ "$1" = update ] || [ "$1" = testPR ]; then
     sudo apt-get update
 
     cd /home/bitcoin || exit 1
-    if [ "$1" = "update" ] || [ "$1" = "testPR" ]; then
-      echo
-      echo "# Deleting the old source code"
-      sudo rm -rf lightning
-    fi
     echo
-    echo "# Cloning https://github.com/ElementsProject/lightning.git"
-    echo
-    sudo -u bitcoin git clone https://github.com/ElementsProject/lightning.git
-    cd lightning || exit 1
-    echo
+    echo "# Deleting the old source code"
+    sudo rm -rf lightning
 
-    if [ "$1" = "update" ]; then
-      if [ $# -gt 1 ]; then
-        CLVERSION=$2
-        echo "# Installing the version ${CLVERSION}"
-        sudo -u bitcoin git reset --hard ${CLVERSION}
-      else
-        echo "# Updating to the latest commit in:"
-        echo "# https://github.com/ElementsProject/lightning"
-        echo "# Make sure this is intended, there might be no way to downgrade your database"
-        echo "# Press ENTER to continue or CTRL+C to abort the update"
-        read -r key
-      fi
+    # Track if we're building from zip (no git history) or git clone
+    buildFromZip=0
+
+    if [ "$1" = "update" ] && [ $# -gt 1 ]; then
+      # Update to a specific version - use zip download with signature verification
+      CLVERSION=$2
+      downloadAndVerifySourceZip
+      buildFromZip=1
+
+    elif [ "$1" = "update" ]; then
+      # Update to latest commit - use git clone (no verification)
+      echo
+      echo "# Cloning https://github.com/ElementsProject/lightning.git"
+      echo
+      sudo -u bitcoin git clone https://github.com/ElementsProject/lightning.git
+      cd lightning || exit 1
+      echo
+      echo "# Updating to the latest commit in:"
+      echo "# https://github.com/ElementsProject/lightning"
+      echo "# Make sure this is intended, there might be no way to downgrade your database"
+      echo "# Press ENTER to continue or CTRL+C to abort the update"
+      read -r key
 
     elif [ "$1" = "testPR" ]; then
+      # Test a PR - use git clone
+      echo
+      echo "# Cloning https://github.com/ElementsProject/lightning.git"
+      echo
+      sudo -u bitcoin git clone https://github.com/ElementsProject/lightning.git
+      cd lightning || exit 1
+      echo
       PRnumber=$2 || exit 1
       echo "# Using the PR:"
       echo "# https://github.com/ElementsProject/lightning/pull/${PRnumber}"
@@ -289,13 +350,17 @@ if [ "$1" = on ] || [ "$1" = update ] || [ "$1" = testPR ]; then
 
     installDependencies
 
-    currentCLversion=$(
-      cd /home/bitcoin/lightning || exit 1
-      git describe --tags 2>/dev/null
-    )
-    echo "# Building from source Core Lightning $currentCLversion"
-
-    buildAndInstallCLbinaries || exit 1
+    if [ "${buildFromZip}" = "1" ]; then
+      echo "# Building from source Core Lightning ${CLVERSION}"
+      buildAndInstallCLbinaries "${CLVERSION}" || exit 1
+    else
+      currentCLversion=$(
+        cd /home/bitcoin/lightning || exit 1
+        git describe --tags 2>/dev/null || echo "unknown"
+      )
+      echo "# Building from source Core Lightning $currentCLversion"
+      buildAndInstallCLbinaries || exit 1
+    fi
 
   fi
 
